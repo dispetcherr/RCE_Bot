@@ -12,7 +12,7 @@ from datetime import datetime
 from typing import Dict, Optional
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
+from telegram.ext import Updater, CommandHandler, CallbackQueryHandler, MessageHandler, Filters, CallbackContext
 from telegram.constants import ParseMode
 
 # ============ КОНФИГУРАЦИЯ ============
